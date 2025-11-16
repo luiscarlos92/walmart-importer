@@ -17,8 +17,9 @@ This version fixes critical parsing bugs from the reference implementation:
 
 ### 1. Discount Parsing
 - **Previous Bug**: Summed ALL negative numbers in the page, including unrelated values
-- **Fix**: Uses proper regex pattern to find discount labels ("Multisave Discount", "Savings", etc.)
-- **Result**: Discount is ALWAYS returned as a negative value (e.g., `-0.76`)
+- **Fix**: Uses proper regex pattern to find discount labels ("Multisave Discount", "Savings", "Member Discount", etc.)
+- **Multiple Discounts**: Handles orders with multiple discount types by summing them all
+- **Result**: Discount is ALWAYS returned as a negative value (e.g., `-0.76` or `-3.75` for multiple discounts)
 
 ### 2. Delivery Fee Parsing
 - **Previous Bug**: Would leave delivery as `None` when not found, causing errors
@@ -202,7 +203,7 @@ The parser (`parsing.py`) uses:
 - **Resilient selectors** that fall back to text patterns
 
 **Critical Rules**:
-- **Discount**: Uses regex `RE_DISCOUNT` to find discount labels, returns as negative value
+- **Discount**: Uses regex `RE_DISCOUNT` to find ALL discount labels (can be multiple), sums them, returns as negative value
 - **Delivery**: Uses regex `RE_DELIVERY` to find delivery/shipping fees, defaults to 0.00 if not found
 - **Money parsing**: Strips `$`, commas, spaces, handles parentheses as negative
 

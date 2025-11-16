@@ -48,10 +48,12 @@ RE_DISCOUNT = re.compile(
     re.IGNORECASE
 )
 
-# BUG FIX: Delivery pattern accepts both "Delivery" and "Shipping" labels
+# BUG FIX: Delivery pattern - only matches delivery FEE lines, not general "Delivery" text
+# Must have "Delivery" or "Shipping" followed by a price within ~50 chars
+# This prevents matching "Delivered on..." or "Delivery from store" followed by item prices
 RE_DELIVERY = re.compile(
-    r"\b(?:Delivery(?:\s*fee)?|Shipping(?:\s*fee)?|Free Delivery From Store)\b.*?\$?\s*([0-9]+\.[0-9]{2})",
-    re.IGNORECASE | re.DOTALL
+    r"\b(?:Delivery|Shipping)\s*(?:fee)?\s*[:\-]?\s*\$\s*([0-9]+\.[0-9]{2})\b",
+    re.IGNORECASE
 )
 
 RE_TAXES = re.compile(r"\bTaxes\b\s*\$?\s*([0-9]+\.[0-9]{2})", re.IGNORECASE)
@@ -154,14 +156,18 @@ def parse_order_page(html: str, order_no: str, url: str) -> OrderSummary:
         subtotal = money_to_float(m.group(1))
 
     # BUG FIX: Proper discount extraction
-    # Use the RE_DISCOUNT pattern to find discount values
+    # Find ALL discount values (there can be multiple: Multisave Discount, Savings, etc.)
+    # They appear between Subtotal and Taxes in the HTML
     # ALWAYS return as NEGATIVE value
     discount = 0.0
-    m = RE_DISCOUNT.search(text_norm)
-    if m:
+    discount_total = 0.0
+    for m in RE_DISCOUNT.finditer(text_norm):
         discount_value = money_to_float(m.group(1))
-        # Ensure it's negative
-        discount = -abs(discount_value)
+        discount_total += abs(discount_value)
+
+    # Return as negative (all discounts summed)
+    if discount_total > 0:
+        discount = -discount_total
 
     # BUG FIX: Delivery defaults to 0.00 if not found
     delivery = 0.0
@@ -208,8 +214,8 @@ def parse_order_page(html: str, order_no: str, url: str) -> OrderSummary:
 
 # Unit tests for critical bug fixes
 def _test_discount_parsing():
-    """Test that discount is always negative."""
-    # Test case 1: Discount shown as "$0.76"
+    """Test that discount is always negative and handles multiple discounts."""
+    # Test case 1: Single discount shown as "$0.76"
     html1 = "<html><body>Subtotal $75.71 Multisave Discount $0.76 Taxes $5.00 Total $80.71</body></html>"
     result1 = parse_order_page(html1, "TEST001", "http://test.com")
     assert result1.discount == -0.76, f"Expected -0.76, got {result1.discount}"
@@ -224,11 +230,21 @@ def _test_discount_parsing():
     result3 = parse_order_page(html3, "TEST003", "http://test.com")
     assert result3.discount == 0.0, f"Expected 0.0, got {result3.discount}"
 
+    # Test case 4: Multiple discounts (e.g., Multisave Discount + Savings)
+    html4 = "<html><body>Subtotal $100.00 Multisave Discount $2.50 Savings $1.25 Taxes $6.00 Total $102.25</body></html>"
+    result4 = parse_order_page(html4, "TEST004", "http://test.com")
+    assert result4.discount == -3.75, f"Expected -3.75 (sum of -2.50 and -1.25), got {result4.discount}"
+
+    # Test case 5: Multiple discounts with different names
+    html5 = "<html><body>Subtotal $50.00 Member Discount $5.00 Coupon Discount $3.00 Taxes $2.00 Total $44.00</body></html>"
+    result5 = parse_order_page(html5, "TEST005", "http://test.com")
+    assert result5.discount == -8.00, f"Expected -8.00 (sum of -5.00 and -3.00), got {result5.discount}"
+
     print("[Test] Discount parsing tests passed!")
 
 
 def _test_delivery_parsing():
-    """Test that delivery defaults to 0.00 when missing."""
+    """Test that delivery defaults to 0.00 when missing and doesn't match false positives."""
     # Test case 1: No delivery fee mentioned
     html1 = "<html><body>Subtotal $75.71 Multisave Discount $0.76 Taxes $5.00 Total $80.71</body></html>"
     result1 = parse_order_page(html1, "TEST001", "http://test.com")
@@ -243,6 +259,20 @@ def _test_delivery_parsing():
     html3 = "<html><body>Subtotal $75.71 Shipping $3.50 Taxes $5.00 Total $84.21</body></html>"
     result3 = parse_order_page(html3, "TEST003", "http://test.com")
     assert result3.delivery == 3.5, f"Expected 3.50, got {result3.delivery}"
+
+    # Test case 4: "Delivered on" and "Delivery from store" with item prices (should NOT match)
+    # This tests the bug fix - ensures we don't match "Delivery from store" followed by item prices
+    html4 = """<html><body>
+    Delivered on Oct 20, Delivery from store, 12 items
+    Subtotal $44.83
+    Item: Pasta $1.97
+    Item: Juice $2.78
+    Multisave Discount $1.36
+    Taxes $0.32
+    Total $43.79
+    </body></html>"""
+    result4 = parse_order_page(html4, "TEST004", "http://test.com")
+    assert result4.delivery == 0.0, f"Expected 0.00 (no delivery fee line), got {result4.delivery}"
 
     print("[Test] Delivery parsing tests passed!")
 

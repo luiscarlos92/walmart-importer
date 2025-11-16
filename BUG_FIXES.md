@@ -34,31 +34,44 @@ fields["discount"] = f"{discount_total:.2f}" if discount_total else "0"
 3. Returns positive value (e.g., `0.76`) instead of negative (spec requires `-0.76`)
 4. Doesn't use the `RE_DISCOUNT` regex that was already defined but never used
 
-**New Code (FIXED)** in `importer/parsing.py:140-148`:
+**New Code (FIXED)** in `importer/parsing.py:156-168`:
 ```python
 # BUG FIX: Proper discount extraction
-# Use the RE_DISCOUNT pattern to find discount values
+# Find ALL discount values (there can be multiple: Multisave Discount, Savings, etc.)
+# They appear between Subtotal and Taxes in the HTML
 # ALWAYS return as NEGATIVE value
 discount = 0.0
-m = RE_DISCOUNT.search(text_norm)
-if m:
+discount_total = 0.0
+for m in RE_DISCOUNT.finditer(text_norm):
     discount_value = money_to_float(m.group(1))
-    # Ensure it's negative
-    discount = -abs(discount_value)
+    discount_total += abs(discount_value)
+
+# Return as negative (all discounts summed)
+if discount_total > 0:
+    discount = -discount_total
 ```
 
 **Improvements**:
 1. ✅ Uses proper `RE_DISCOUNT` regex pattern that looks for discount labels
 2. ✅ Pattern: `\b(?:Savings|Multisave\s*Discount|[\w\s]*Discount)\b`
 3. ✅ Only captures values near discount-related labels
-4. ✅ ALWAYS returns negative value using `-abs(discount_value)`
+4. ✅ Handles **MULTIPLE discounts** by using `finditer()` instead of `search()`
+5. ✅ Sums all discounts together (e.g., Multisave Discount + Member Discount)
+6. ✅ ALWAYS returns negative value using `-discount_total`
 
-**Test Case**:
+**Test Cases**:
 ```python
+# Test 1: Single discount
 # Input: "Subtotal $75.71 Multisave Discount $0.76 Taxes $5.00 Total $80.71"
 # Expected: discount = -0.76
 # Reference Result: 0.76 (WRONG - positive, and might include other negatives)
 # New Result: -0.76 (CORRECT)
+
+# Test 2: Multiple discounts
+# Input: "Subtotal $100.00 Multisave Discount $2.50 Savings $1.25 Taxes $6.00 Total $102.25"
+# Expected: discount = -3.75 (sum of -2.50 and -1.25)
+# Reference Result: Would only find first or sum random negatives (WRONG)
+# New Result: -3.75 (CORRECT - sums all discount types)
 ```
 
 ### 2. Delivery Fee Bug
@@ -77,10 +90,19 @@ if m:
 1. If no delivery fee is found, `fields["delivery"]` stays `None`
 2. This causes issues when writing files or calculating totals
 3. Spec requires: "If no Delivery/Shipping fee is visible, set **0.00**"
+4. **CRITICAL**: The regex pattern `r"\b(?:Delivery(?:\s*fee)?|Shipping(?:\s*fee)?|Free Delivery From Store)\b.*?\$?\s*([0-9]+\.[0-9]{2})"` with `DOTALL` flag is too greedy
+5. It matches "Delivered on" or "Delivery from store" and then captures ANY price later (including item prices)
+6. Example: "Delivered on Oct 20, Delivery from store" ... [page content] ... "Item: Pasta $1.97" would incorrectly capture $1.97 as delivery fee
 
-**New Code (FIXED)** in `importer/parsing.py:150-155`:
+**New Code (FIXED)** in `importer/parsing.py:51-57` and `170-175`:
 ```python
-# BUG FIX: Delivery defaults to 0.00 if not found
+# Regex pattern - much more restrictive
+RE_DELIVERY = re.compile(
+    r"\b(?:Delivery|Shipping)\s*(?:fee)?\s*[:\-]?\s*\$\s*([0-9]+\.[0-9]{2})\b",
+    re.IGNORECASE
+)
+
+# Usage
 delivery = 0.0
 m = RE_DELIVERY.search(text_norm)
 if m:
@@ -91,15 +113,30 @@ if m:
 **Improvements**:
 1. ✅ Initializes `delivery = 0.0` as default
 2. ✅ Only updates if delivery fee is found
-3. ✅ Matches spec requirement exactly
+3. ✅ **NEW**: Pattern requires dollar sign `$` immediately after "Delivery"/"Shipping" (with optional "fee", colons, dashes)
+4. ✅ **NEW**: Removed `DOTALL` flag - prevents matching across entire page
+5. ✅ **NEW**: Will NOT match "Delivered on..." or "Delivery from store" followed by item prices
+6. ✅ Matches spec requirement exactly
 
-**Test Case**:
+**Test Cases**:
 ```python
+# Test 1: No delivery fee
 # Input: "Subtotal $75.71 Multisave Discount $0.76 Taxes $5.00 Total $80.71"
-# (No delivery/shipping mentioned)
 # Expected: delivery = 0.00
-# Reference Result: None (WRONG - causes errors)
+# Reference Result: None (WRONG)
 # New Result: 0.00 (CORRECT)
+
+# Test 2: Delivery fee present
+# Input: "Subtotal $75.71 Delivery fee $5.00 Taxes $5.00 Total $85.71"
+# Expected: delivery = 5.00
+# New Result: 5.00 (CORRECT)
+
+# Test 3: False positive (real-world bug from order 600000046848554)
+# Input: "Delivered on Oct 20, Delivery from store, 12 items
+#         Subtotal $44.83 Item: Pasta $1.97 ... Taxes $0.32 Total $43.79"
+# Expected: delivery = 0.00 (no fee line exists)
+# Reference Result: 1.97 (WRONG - captured first item price!)
+# New Result: 0.00 (CORRECT - doesn't match false positive)
 ```
 
 ### 3. Total and Subtotal (Verified Working)
